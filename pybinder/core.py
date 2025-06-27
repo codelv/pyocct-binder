@@ -142,6 +142,9 @@ class Generator(object):
     immutable = set()
     split = set()
 
+    # Convert to `void *`
+    opaque_types = set()
+
     # Mapping of package name to module
     namespace = dict()
 
@@ -529,6 +532,11 @@ class Generator(object):
                             self.patches[qname].append(pair)
                         else:
                             self.patches[qname] = [pair]
+                        continue
+
+                    if line.startswith('+opaque'):
+                        line = line[len("+opaque"):].strip()
+                        self.opaque_types.add(line)
                         continue
 
                     # Manual text before a module
@@ -2402,6 +2410,23 @@ class TypeBinder(object):
         return self.type.is_const_qualified()
 
     @property
+    def is_opaque(self):
+        """ An opaque type with no known definition """
+        if self.is_pointer:
+            spelling = self.spelling
+            if spelling.startswith("struct "):
+                spelling = spelling[7:]
+            if spelling.strip("* ") in Generator.opaque_types:
+                return True
+        elif self.is_alias:
+            spelling = self.alias_spelling
+            if spelling.startswith("struct "):
+                spelling = spelling[7:]
+            if spelling.endswith("*") and spelling.strip("* ") in Generator.opaque_types:
+                return True
+        return False
+
+    @property
     def is_alias(self):
         if self.is_elaborated:
             d = self.get_declaration()
@@ -2703,6 +2728,9 @@ def generate_function(binder):
     docs = binder.docs
 
     rtype = binder.rtype.spelling
+    if binder.rtype.is_opaque:
+        rtype = f"void* /* {rtype} */"
+
     _, _, _, signature, _, is_array_like = function_signature(binder)
     if signature:
         signature = ', '.join(signature)
@@ -2725,6 +2753,7 @@ def generate_function(binder):
         args = ', ' + ', '.join(args)
     else:
         args = ''
+
 
     # Source
     interface = '({} (*) ({}))'.format(rtype, signature)
@@ -3055,7 +3084,9 @@ def generate_method(binder):
     elif binder.is_pure_virtual_method:
         prefix = '// virtual // {}'.format(prefix)
 
-    if binder.rtype.is_alias:
+    if binder.rtype.is_opaque:
+        rtype = f"void* /* {binder.rtype.spelling} */"
+    elif binder.rtype.is_alias:
         rtype = binder.rtype.alias_spelling
     else:
         rtype = binder.rtype.spelling
@@ -3100,6 +3131,7 @@ def generate_method(binder):
         cguards = ', ' + ', '.join(Generator.call_guards[qname])
 
     needs_inout = binder.needs_inout_method
+    needs_opaque_cast = any(t.startswith("void* /*") for t in args_type)
 
     for i in range(nargs - ndefaults, nargs + 1):
         if needs_inout:
@@ -3114,7 +3146,7 @@ def generate_method(binder):
             if True in is_array_like:
                 src = ' '.join(['//', src])
             return [src]
-        elif i == nargs:
+        elif i == nargs and not needs_opaque_cast:
             names = args_name[0:i]
             types = args_type[0:i]
 
@@ -3139,23 +3171,24 @@ def generate_method(binder):
                 args_spelling.append(args_name[j])
 
             if is_static:
-                signature = ''
+                signature_parts = []
             else:
                 parts = qname.split('::')
                 parent_spelling = '::'.join(parts[:-1])
-                signature = parent_spelling + ' &self'
+                signature_parts = [parent_spelling + ' &self']
 
-            k = 0
             call_args = []
-            for arg_type_spelling in arg_list:
-                if not signature:
-                    signature += '{} {}'.format(arg_type_spelling,
-                                                'a' + str(k))
+            for k, arg_type in enumerate(arg_list):
+                arg_name = f"a{k}"
+                signature_parts.append(f'{arg_type} {arg_name}')
+
+                # Workaround for opaque types
+                if m := re.match(r"void\* /\* (.+) \*/", arg_type):
+                    original_type = m.group(1)
+                    call_args.append(f"static_cast<{original_type}>({arg_name})")
                 else:
-                    signature += ', {} {}'.format(arg_type_spelling,
-                                                  'a' + str(k))
-                call_args.append('a' + str(k))
-                k += 1
+                    call_args.append(arg_name)
+            signature = ', '.join(signature_parts)
             call = ', '.join(call_args)
 
             if not is_static:
@@ -3163,9 +3196,9 @@ def generate_method(binder):
             else:
                 qname_ = qname
 
-            src = '{}.def{}(\"{}\", []({}) -> {} {{ return {}({}); }}{});\n'.format(
+            src = '{}.def{}(\"{}\", []({}) -> {} {{ return {}({}); }}, "{}"{});\n'.format(
                 prefix, is_static, fname, signature, rtype, qname_, call,
-                cguards)
+                docs, cguards)
 
             if is_operator:
                 # Hack disable self.__call__
@@ -3276,16 +3309,12 @@ def function_signature(binder):
     for arg in binder.parameters:
         nargs += 1
         args_name.append(arg.spelling)
-        if arg.type.is_alias:
+        if arg.type.is_opaque:
+            args_type.append(f"void* /* {arg.type.spelling} */")
+        elif arg.type.is_alias:
             args_type.append(arg.type.alias_spelling)
         else:
             args_type.append(arg.type.spelling)
-        # if (
-        #        "const TopOpeBRep_FacesFiller*&" == args_type[-1]
-        # ):
-        #        import IPython
-        #        IPython.embed()
-        #        assert False
         default = arg.default_value
         defaults.append(default)
         if default:
