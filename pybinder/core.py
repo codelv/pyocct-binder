@@ -1413,7 +1413,7 @@ class CursorBinder(object):
         """
         try:
             return self.cursor.kind
-        except AttributeError:
+        except Exception:
             return CursorKind.NO_DECL_FOUND
 
     @property
@@ -1456,7 +1456,7 @@ class CursorBinder(object):
         """
         try:
             return self.cursor.displayname
-        except AttributeError:
+        except Exception:
             return 'NULL'
 
     @property
