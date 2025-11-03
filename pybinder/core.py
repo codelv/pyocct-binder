@@ -1382,7 +1382,7 @@ class CursorBinder(object):
         try:
             fname = cursor.location.file.name
             fname = fname.replace('\\', '/').split('/')[-1]
-        except AttributeError:
+        except Exception:
             fname = None
         self.filename = fname
 
